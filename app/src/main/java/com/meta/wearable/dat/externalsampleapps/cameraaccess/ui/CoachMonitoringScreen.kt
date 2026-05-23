@@ -14,22 +14,18 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -56,7 +52,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.Wearables
 fun CoachMonitoringScreen(
     wearablesViewModel: WearablesViewModel,
     coachViewModel: CoachModeViewModel,
-    onBack: () -> Unit,
+    onEnd: () -> Unit,
     modifier: Modifier = Modifier,
     streamViewModel: StreamViewModel =
         viewModel(
@@ -98,39 +94,45 @@ fun CoachMonitoringScreen(
       CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
     }
 
-    Box(modifier = Modifier.fillMaxSize().systemBarsPadding().padding(16.dp)) {
-      IconButton(
-          onClick = onBack,
-          modifier = Modifier.align(Alignment.TopStart),
-      ) {
-        Icon(
-            Icons.AutoMirrored.Filled.ArrowBack,
-            contentDescription = stringResource(R.string.mode_back),
-            tint = Color.White,
-        )
+    Column(
+        modifier = Modifier.fillMaxSize().systemBarsPadding().padding(12.dp),
+    ) {
+      coachUiState.lastRoast?.let { Banner(text = it, container = Color(0xCC222222)) }
+      coachUiState.lastError?.let {
+        Spacer(Modifier.size(8.dp))
+        Banner(text = it, container = Color(0xCC8B0000))
       }
 
-      WatchingChip(
-          modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
-      )
+      Spacer(Modifier.weight(1f))
 
       Column(
-          modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().fillMaxWidth(),
+          modifier =
+              Modifier.fillMaxWidth()
+                  .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+                  .padding(12.dp),
       ) {
-        coachUiState.lastError?.let { err ->
-          Text(
-              text = err,
-              color = Color.White,
-              modifier =
-                  Modifier.fillMaxWidth()
-                      .background(Color(0xCC8B0000), RoundedCornerShape(8.dp))
-                      .padding(12.dp),
-          )
-          Spacer(Modifier.size(12.dp))
+        TotalsBar(totals = totalsOf(coachUiState.log), textColor = Color.White)
+        Spacer(Modifier.size(8.dp))
+        if (coachUiState.log.isEmpty()) {
+          Text(stringResource(R.string.coach_log_empty), color = Color.White.copy(alpha = 0.7f))
+        } else {
+          LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp)) {
+            items(items = coachUiState.log.asReversed(), key = { it.id }) { entry ->
+              FoodLogRow(
+                  entry = entry,
+                  textColor = Color.White,
+                  mutedColor = Color.White.copy(alpha = 0.7f),
+              )
+            }
+          }
         }
+      }
+
+      Spacer(Modifier.size(12.dp))
+      Column(modifier = Modifier.navigationBarsPadding()) {
         SwitchButton(
-            label = stringResource(R.string.coach_stop),
-            onClick = onBack,
+            label = stringResource(R.string.coach_end_session),
+            onClick = onEnd,
             isDestructive = true,
         )
       }
@@ -139,25 +141,12 @@ fun CoachMonitoringScreen(
 }
 
 @Composable
-private fun WatchingChip(modifier: Modifier = Modifier) {
-  Row(
+private fun Banner(text: String, container: Color) {
+  Text(
+      text = text,
+      color = Color.White,
+      fontWeight = FontWeight.Medium,
       modifier =
-          modifier
-              .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
-              .padding(horizontal = 12.dp, vertical = 6.dp),
-      verticalAlignment = Alignment.CenterVertically,
-  ) {
-    Box(
-        modifier =
-            Modifier.size(8.dp)
-                .background(Color(0xFF4CD964), shape = RoundedCornerShape(50)),
-    )
-    Spacer(Modifier.width(8.dp))
-    Text(
-        text = stringResource(R.string.coach_status_watching),
-        color = Color.White,
-        fontWeight = FontWeight.Medium,
-    )
-  }
+          Modifier.fillMaxWidth().background(container, RoundedCornerShape(8.dp)).padding(12.dp),
+  )
 }
-

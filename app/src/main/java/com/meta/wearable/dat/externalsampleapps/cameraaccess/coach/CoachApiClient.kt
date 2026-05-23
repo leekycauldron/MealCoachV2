@@ -19,6 +19,17 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** A food/drink the model spotted in a frame. [label] is set when it matched a known dataset label. */
+data class DetectedFood(
+    val label: String?,
+    val name: String,
+    val calories: Int,
+    val proteinG: Float,
+    val carbsG: Float,
+    val fatG: Float,
+    val isJunk: Boolean,
+)
+
 object CoachApiClient {
 
   private const val TAG = "CoachMode:ApiClient"
@@ -27,50 +38,72 @@ object CoachApiClient {
   private const val HAIKU_MODEL = "claude-haiku-4-5-20251001"
   private const val SONNET_MODEL = "claude-sonnet-4-6"
   private const val JPEG_QUALITY = 75
-  private const val DETECT_MAX_TOKENS = 8
+  private const val ANALYZE_MAX_TOKENS = 1024
   private const val ROAST_MAX_TOKENS = 200
+  private const val TOOL_NAME = "report_foods"
 
-  suspend fun detectJunkFood(
+  /** Identifies foods in [frame] with nutrition + a junk flag. Matched items echo a known [knownLabels] label. */
+  suspend fun analyzeFrame(
       apiKey: String,
       avoidances: String,
+      knownLabels: List<String>,
       frame: Bitmap,
-  ): Result<Boolean> =
+  ): Result<List<DetectedFood>> =
       withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
-          return@withContext Result.failure(
-              IllegalStateException("Anthropic API key is missing."))
+          return@withContext Result.failure(IllegalStateException("Anthropic API key is missing."))
         }
         try {
           val avoidanceLine =
-              if (avoidances.isBlank()) {
-                "The user is generally trying to avoid junk food."
-              } else {
-                "The user is trying to avoid: $avoidances."
-              }
+              if (avoidances.isBlank()) "generally trying to eat healthier"
+              else "trying to avoid: $avoidances"
           val system =
               """
-              You are a fast visual classifier. Decide whether the image shows the user
-              about to consume junk food they are trying to avoid. $avoidanceLine
-              Junk food examples: fast food, fried food, chips, candy, sugary drinks,
-              donuts, pastries, ice cream, processed snacks.
-              Respond with exactly one word: YES or NO. No punctuation, no explanation.
+              You are a nutrition vision assistant analyzing a live first-person camera frame.
+              Identify each distinct food or drink item the person could eat or drink in the frame.
+              Report every item by calling $TOOL_NAME. For each item:
+                - label: if it clearly matches one of the KNOWN LABELS, copy that label EXACTLY;
+                  otherwise null.
+                - name: a short human-readable name.
+                - calories, protein_g, carbs_g, fat_g: best estimate for ONE typical serving.
+                - is_junk: true if it is junk / off-plan for someone $avoidanceLine.
+              If there is no food or drink in the frame, return an empty foods array.
               """
                   .trimIndent()
 
-          val body =
-              buildBody(
-                  model = HAIKU_MODEL,
-                  maxTokens = DETECT_MAX_TOKENS,
-                  system = system,
-                  imagePart = bitmapPart(frame),
-                  textPart = "Is this junk food the user should avoid? YES or NO.",
-              )
-          val response = postJson(apiKey, body)
-          val text = extractText(response).trim().uppercase()
-          val isJunk = text.startsWith("YES")
-          Result.success(isJunk)
+          val labelsText = if (knownLabels.isEmpty()) "(none)" else knownLabels.joinToString(", ")
+          val content =
+              JSONArray()
+                  .put(bitmapPart(frame))
+                  .put(
+                      textBlock(
+                          "KNOWN LABELS: $labelsText\n\nIdentify the food or drink in this frame."))
+
+          val root =
+              JSONObject().apply {
+                put("model", HAIKU_MODEL)
+                put("max_tokens", ANALYZE_MAX_TOKENS)
+                put("system", system)
+                put("tools", JSONArray().put(foodsTool()))
+                put(
+                    "tool_choice",
+                    JSONObject().apply {
+                      put("type", "tool")
+                      put("name", TOOL_NAME)
+                    })
+                put(
+                    "messages",
+                    JSONArray()
+                        .put(
+                            JSONObject().apply {
+                              put("role", "user")
+                              put("content", content)
+                            }))
+              }
+
+          Result.success(parseFoods(postJson(apiKey, root.toString())))
         } catch (e: Exception) {
-          Log.e(TAG, "detectJunkFood failed", e)
+          Log.e(TAG, "analyzeFrame failed", e)
           Result.failure(e)
         }
       }
@@ -82,16 +115,12 @@ object CoachApiClient {
   ): Result<String> =
       withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
-          return@withContext Result.failure(
-              IllegalStateException("Anthropic API key is missing."))
+          return@withContext Result.failure(IllegalStateException("Anthropic API key is missing."))
         }
         try {
           val avoidanceLine =
-              if (avoidances.isBlank()) {
-                "They are trying to eat better."
-              } else {
-                "They told you they are trying to avoid: $avoidances."
-              }
+              if (avoidances.isBlank()) "They are trying to eat better."
+              else "They told you they are trying to avoid: $avoidances."
           val system =
               """
               You are the user's witty, sarcastic friend who keeps them honest about
@@ -122,18 +151,104 @@ object CoachApiClient {
         }
       }
 
-  private fun bitmapPart(bitmap: Bitmap): JSONObject {
+  private fun foodsTool(): JSONObject {
+    val item =
+        JSONObject().apply {
+          put("type", "object")
+          put(
+              "properties",
+              JSONObject().apply {
+                put("label", schema("string", "Exact known label if matched, else null"))
+                put("name", schema("string", "Short human-readable food/drink name"))
+                put("calories", schema("number", "Calories for one typical serving"))
+                put("protein_g", schema("number", "Protein grams"))
+                put("carbs_g", schema("number", "Carb grams"))
+                put("fat_g", schema("number", "Fat grams"))
+                put("is_junk", schema("boolean", "True if junk / off-plan for this user"))
+              })
+          put(
+              "required",
+              JSONArray()
+                  .put("name")
+                  .put("calories")
+                  .put("protein_g")
+                  .put("carbs_g")
+                  .put("fat_g")
+                  .put("is_junk"))
+        }
+    val inputSchema =
+        JSONObject().apply {
+          put("type", "object")
+          put(
+              "properties",
+              JSONObject().apply {
+                put(
+                    "foods",
+                    JSONObject().apply {
+                      put("type", "array")
+                      put("items", item)
+                    })
+              })
+          put("required", JSONArray().put("foods"))
+        }
     return JSONObject().apply {
-      put("type", "image")
-      put(
-          "source",
-          JSONObject().apply {
-            put("type", "base64")
-            put("media_type", "image/jpeg")
-            put("data", bitmapToBase64Jpeg(bitmap))
-          })
+      put("name", TOOL_NAME)
+      put("description", "Report every food/drink item visible in the frame.")
+      put("input_schema", inputSchema)
     }
   }
+
+  private fun parseFoods(response: String): List<DetectedFood> {
+    val content = JSONObject(response).optJSONArray("content") ?: return emptyList()
+    for (i in 0 until content.length()) {
+      val block = content.getJSONObject(i)
+      if (block.optString("type") != "tool_use") continue
+      val foods = block.optJSONObject("input")?.optJSONArray("foods") ?: continue
+      val result = mutableListOf<DetectedFood>()
+      for (j in 0 until foods.length()) {
+        val o = foods.getJSONObject(j)
+        val name = o.optString("name").trim()
+        if (name.isEmpty()) continue
+        val label = o.optString("label").trim().ifEmpty { null }
+        result.add(
+            DetectedFood(
+                label = if (label.equals("null", ignoreCase = true)) null else label,
+                name = name,
+                calories = o.optDouble("calories", 0.0).toInt(),
+                proteinG = o.optDouble("protein_g", 0.0).toFloat(),
+                carbsG = o.optDouble("carbs_g", 0.0).toFloat(),
+                fatG = o.optDouble("fat_g", 0.0).toFloat(),
+                isJunk = o.optBoolean("is_junk", false),
+            ))
+      }
+      return result
+    }
+    return emptyList()
+  }
+
+  private fun schema(type: String, description: String): JSONObject =
+      JSONObject().apply {
+        put("type", type)
+        put("description", description)
+      }
+
+  private fun textBlock(text: String): JSONObject =
+      JSONObject().apply {
+        put("type", "text")
+        put("text", text)
+      }
+
+  private fun bitmapPart(bitmap: Bitmap): JSONObject =
+      JSONObject().apply {
+        put("type", "image")
+        put(
+            "source",
+            JSONObject().apply {
+              put("type", "base64")
+              put("media_type", "image/jpeg")
+              put("data", bitmapToBase64Jpeg(bitmap))
+            })
+      }
 
   private fun buildBody(
       model: String,
@@ -142,25 +257,20 @@ object CoachApiClient {
       imagePart: JSONObject,
       textPart: String,
   ): String {
-    val content =
-        JSONArray()
-            .put(imagePart)
-            .put(JSONObject().apply { put("type", "text").put("text", textPart) })
-
+    val content = JSONArray().put(imagePart).put(textBlock(textPart))
     val message =
         JSONObject().apply {
           put("role", "user")
           put("content", content)
         }
-
-    val root =
-        JSONObject().apply {
+    return JSONObject()
+        .apply {
           put("model", model)
           put("max_tokens", maxTokens)
           put("system", system)
           put("messages", JSONArray().put(message))
         }
-    return root.toString()
+        .toString()
   }
 
   private fun bitmapToBase64Jpeg(bitmap: Bitmap): String {

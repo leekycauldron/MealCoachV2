@@ -108,13 +108,12 @@
 
     <!-- Coach Mode -->
     <string name="coach_intro_title">What are you cutting back on?</string>
-    <string name="coach_intro_description">Coach Mode watches your camera feed and calls you out when it spots something off-plan. The roast plays through your glasses out loud.</string>
+    <string name="coach_intro_description">Coach Mode logs the food it sees and calls you out loud when it spots something off-plan. Review everything in the debrief when you finish.</string>
     <string name="coach_intro_hint">e.g. fried food, sugar, soda, late-night snacks</string>
-    <string name="coach_start_watching">Start watching</string>
-    <string name="coach_status_watching">Watching… I\'ll let you know.</string>
-    <string name="coach_stop">Stop Coach</string>
-    <string name="coach_alert_title">Caught you.</string>
-    <string name="coach_alert_keep_watching">Keep watching</string>
-    <string name="coach_alert_stop">Stop Coach</string>
-    <string name="coach_error_title">Coach lost connection</string>
+    <string name="coach_start_watching">Start coaching</string>
+    <string name="coach_end_session">End session</string>
+    <string name="coach_log_empty">No food logged yet.</string>
+    <string name="coach_debrief_title">Session debrief</string>
+    <string name="coach_debrief_done">Done</string>
+    <string name="coach_items_logged"><xliff:g id="count">%1$d</xliff:g> items logged</string>
 </resources>

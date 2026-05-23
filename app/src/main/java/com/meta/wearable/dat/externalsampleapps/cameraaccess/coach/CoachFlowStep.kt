@@ -11,5 +11,5 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.coach
 enum class CoachFlowStep {
   PREFERENCES,
   MONITORING,
-  ALERT,
+  DEBRIEF,
 }

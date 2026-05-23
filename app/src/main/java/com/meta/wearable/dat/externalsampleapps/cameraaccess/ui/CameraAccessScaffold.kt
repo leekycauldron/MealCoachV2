@@ -196,10 +196,9 @@ private fun CoachFlowHost(
         CoachMonitoringScreen(
             wearablesViewModel = wearablesViewModel,
             coachViewModel = coachViewModel,
-            onBack = {
-              coachViewModel.stopMonitoring()
+            onEnd = {
+              coachViewModel.endStream()
               wearablesViewModel.navigateToDeviceSelection()
-              coachViewModel.goBackToPreferences()
             },
         )
       } else {
@@ -208,13 +207,10 @@ private fun CoachFlowHost(
         }
       }
     }
-    CoachFlowStep.ALERT ->
-        CoachAlertScreen(
-            roastMessage = coachUiState.roastMessage.orEmpty(),
-            onKeepWatching = { coachViewModel.resumeWatching() },
-            onStop = {
-              coachViewModel.stopMonitoring()
-              wearablesViewModel.navigateToDeviceSelection()
+    CoachFlowStep.DEBRIEF ->
+        CoachDebriefScreen(
+            state = coachUiState,
+            onDone = {
               coachViewModel.resetFlow()
               wearablesViewModel.clearAppMode()
             },

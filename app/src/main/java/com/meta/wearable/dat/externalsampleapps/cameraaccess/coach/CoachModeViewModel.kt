@@ -17,6 +17,8 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -31,20 +33,33 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
 
   companion object {
     private const val TAG = "CoachMode:ViewModel"
-    private const val POLL_INTERVAL_MS = 10_000L
-    private const val COOLDOWN_MS = 30_000L
+    // How often we send a frame to the model for food/junk analysis (core loop cadence).
+    private const val POLL_INTERVAL_MS = 4_000L
+    // Skip the first frame(s) right after the stream starts (often black while the camera settles).
+    private const val INITIAL_DELAY_MS = 2_000L
+    // Per-food de-dup: the same item won't be logged again within this window (demo double-count guard).
+    private const val LOG_DEDUP_MS = 5_000L
+    // Minimum time between spoken roasts so junk detection doesn't constantly go off.
+    private const val ROAST_COOLDOWN_MS = 30_000L
+    // After an analysis error, wait this long before trying again (instead of killing the session).
+    private const val ERROR_BACKOFF_MS = 8_000L
     private const val MAX_CONSECUTIVE_ERRORS = 3
-    // Delay before speaking so the camera stream's stop/disconnect sound finishes first.
-    private const val TTS_START_DELAY_MS = 1_500L
   }
 
   private val _uiState = MutableStateFlow(CoachUiState())
   val uiState: StateFlow<CoachUiState> = _uiState.asStateFlow()
 
+  private val dataset = FoodDataset.load(application)
+  private val datasetLabels = dataset.values.map { it.label }
+
   private var watchJob: Job? = null
-  private var speakJob: Job? = null
+  private var roastJob: Job? = null
   private var frameProvider: (() -> Bitmap?)? = null
   private var mediaPlayer: MediaPlayer? = null
+
+  private val lastLoggedAtMs = HashMap<String, Long>() // per-food de-dup timestamps
+  private var lastRoastAtMs = 0L
+  private var logIdSeq = 0L
 
   init {
     val configured =
@@ -60,75 +75,109 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   fun goToMonitoring() {
+    lastLoggedAtMs.clear()
+    lastRoastAtMs = 0L
+    logIdSeq = 0L
     _uiState.update {
-      it.copy(step = CoachFlowStep.MONITORING, roastMessage = null, lastError = null)
+      it.copy(
+          step = CoachFlowStep.MONITORING,
+          log = persistentListOf(),
+          lastRoast = null,
+          lastError = null,
+      )
     }
   }
 
   fun startMonitoring(getFrame: () -> Bitmap?) {
     frameProvider = getFrame
     if (watchJob?.isActive == true) return
-    _uiState.update { it.copy(isWatching = true, lastError = null) }
-    watchJob = viewModelScope.launch { watchLoop(initialDelay = POLL_INTERVAL_MS) }
+    _uiState.update { it.copy(isWatching = true) }
+    watchJob = viewModelScope.launch { watchLoop() }
   }
 
-  private suspend fun watchLoop(initialDelay: Long) {
+  private suspend fun watchLoop() {
     var consecutiveErrors = 0
-    delay(initialDelay)
+    delay(INITIAL_DELAY_MS)
     while (currentCoroutineContext().isActive) {
       val frame = frameProvider?.invoke()
       if (frame == null) {
         delay(POLL_INTERVAL_MS)
         continue
       }
-      val avoidances = _uiState.value.avoidances
       val apiKey = BuildConfig.ANTHROPIC_API_KEY
-
-      val detectResult = CoachApiClient.detectJunkFood(apiKey, avoidances, frame)
-      detectResult.fold(
-          onSuccess = { isJunk ->
-            consecutiveErrors = 0
-            if (isJunk) {
-              val roastResult = CoachApiClient.generateRoast(apiKey, avoidances, frame)
-              roastResult.fold(
-                  onSuccess = { text -> triggerAlert(text) },
-                  onFailure = { error ->
-                    Log.e(TAG, "Roast generation failed", error)
-                    triggerAlert(
-                        "Hey — that doesn't look like part of the plan. (Couldn't reach my snark generator, but you know what you're doing.)")
-                  },
-              )
-              return
-            }
-          },
-          onFailure = { error ->
-            Log.e(TAG, "Detection failed", error)
-            consecutiveErrors += 1
-            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-              _uiState.update {
-                it.copy(
-                    isWatching = false,
-                    lastError = error.message ?: "Coach watcher gave up after repeated errors.",
-                )
-              }
-              return
-            }
-          },
-      )
+      CoachApiClient.analyzeFrame(apiKey, _uiState.value.avoidances, datasetLabels, frame)
+          .fold(
+              onSuccess = { foods ->
+                consecutiveErrors = 0
+                if (_uiState.value.lastError != null) _uiState.update { it.copy(lastError = null) }
+                foods.forEach(::logFood)
+                if (foods.any { it.isJunk }) maybeRoast(frame)
+              },
+              onFailure = { error ->
+                Log.e(TAG, "analyzeFrame failed", error)
+                consecutiveErrors += 1
+                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                  _uiState.update { it.copy(lastError = "Coach is having trouble connecting…") }
+                }
+                delay(ERROR_BACKOFF_MS) // back off, but keep the session alive
+              },
+          )
       delay(POLL_INTERVAL_MS)
     }
   }
 
-  private fun triggerAlert(roast: String) {
-    _uiState.update {
-      it.copy(step = CoachFlowStep.ALERT, roastMessage = roast, isWatching = false)
-    }
-    speakJob?.cancel()
-    speakJob =
+  private fun logFood(food: DetectedFood) {
+    val key = FoodDataset.normalize(food.label ?: food.name)
+    if (key.isBlank()) return
+    val now = System.currentTimeMillis()
+    if (now - (lastLoggedAtMs[key] ?: 0L) < LOG_DEDUP_MS) return // de-dup
+    lastLoggedAtMs[key] = now
+
+    val info = food.label?.let { dataset[FoodDataset.normalize(it)] }
+    val entry =
+        if (info != null) {
+          FoodLogEntry(
+              id = logIdSeq++,
+              timestampMs = now,
+              displayName = info.displayName,
+              calories = info.calories,
+              proteinG = info.proteinG,
+              carbsG = info.carbsG,
+              fatG = info.fatG,
+              fromDataset = true,
+              isJunk = food.isJunk,
+          )
+        } else {
+          FoodLogEntry(
+              id = logIdSeq++,
+              timestampMs = now,
+              displayName = food.name,
+              calories = food.calories,
+              proteinG = food.proteinG,
+              carbsG = food.carbsG,
+              fatG = food.fatG,
+              fromDataset = false,
+              isJunk = food.isJunk,
+          )
+        }
+    _uiState.update { it.copy(log = (it.log + entry).toImmutableList()) }
+  }
+
+  private fun maybeRoast(frame: Bitmap) {
+    val now = System.currentTimeMillis()
+    if (now - lastRoastAtMs < ROAST_COOLDOWN_MS) return // global cooldown
+    if (mediaPlayer != null) return // a roast is still playing
+    lastRoastAtMs = now
+    // Copy so the stream's buffer can't recycle the frame while the roast call runs.
+    val snapshot = frame.copy(Bitmap.Config.ARGB_8888, false)
+    roastJob =
         viewModelScope.launch {
-          // Wait for the stream-end sound to finish so it doesn't talk over the roast.
-          delay(TTS_START_DELAY_MS)
-          if (_uiState.value.step == CoachFlowStep.ALERT) speak(roast)
+          val roast =
+              CoachApiClient.generateRoast(
+                      BuildConfig.ANTHROPIC_API_KEY, _uiState.value.avoidances, snapshot)
+                  .getOrElse { "Hey — that doesn't look like part of the plan." }
+          _uiState.update { it.copy(lastRoast = roast) }
+          speak(roast)
         }
   }
 
@@ -150,7 +199,6 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
     releasePlayer()
     mediaPlayer =
         MediaPlayer().apply {
-          // Route as media so it plays through the connected glasses (A2DP) or the phone.
           setAudioAttributes(
               AudioAttributes.Builder()
                   .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -173,28 +221,13 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
     mediaPlayer = null
   }
 
-  fun resumeWatching() {
+  /** Ends the session: stops the watch loop but keeps the log, and moves to the debrief. */
+  fun endStream() {
+    stopMonitoring()
     stopSpeaking()
-    if (frameProvider == null) {
-      _uiState.update { it.copy(step = CoachFlowStep.MONITORING) }
-      return
-    }
-    _uiState.update {
-      it.copy(
-          step = CoachFlowStep.MONITORING,
-          roastMessage = null,
-          isWatching = true,
-          lastError = null,
-      )
-    }
-    watchJob?.cancel()
-    watchJob = viewModelScope.launch { watchLoop(initialDelay = COOLDOWN_MS) }
+    _uiState.update { it.copy(step = CoachFlowStep.DEBRIEF) }
   }
 
-  // Stops the watch loop only. Deliberately does NOT stop TTS: this runs when the monitoring
-  // screen is disposed on the MONITORING -> ALERT transition, which is exactly when the roast
-  // is starting to speak. Speech is cancelled separately via stopSpeaking() when the user
-  // actually leaves the alert/coach flow.
   fun stopMonitoring() {
     watchJob?.cancel()
     watchJob = null
@@ -203,26 +236,23 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   private fun stopSpeaking() {
-    speakJob?.cancel()
-    speakJob = null
+    roastJob?.cancel()
+    roastJob = null
     releasePlayer()
   }
 
   fun resetFlow() {
     stopMonitoring()
     stopSpeaking()
-    _uiState.value = _uiState.value.copy(
-        step = CoachFlowStep.PREFERENCES,
-        roastMessage = null,
-        lastError = null,
-    )
-  }
-
-  fun goBackToPreferences() {
-    stopMonitoring()
-    stopSpeaking()
+    lastLoggedAtMs.clear()
+    lastRoastAtMs = 0L
     _uiState.update {
-      it.copy(step = CoachFlowStep.PREFERENCES, roastMessage = null, lastError = null)
+      it.copy(
+          step = CoachFlowStep.PREFERENCES,
+          log = persistentListOf(),
+          lastRoast = null,
+          lastError = null,
+      )
     }
   }
 
