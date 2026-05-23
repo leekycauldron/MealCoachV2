@@ -20,6 +20,8 @@ val localProps =
       if (f.exists()) f.inputStream().use { load(it) }
     }
 val anthropicApiKey: String = localProps.getProperty("anthropic_api_key", "")
+val elevenLabsApiKey: String = localProps.getProperty("elevenlabs_api_key", "")
+val elevenLabsVoiceId: String = localProps.getProperty("elevenlabs_voice_id", "")
 
 android {
   namespace = "com.meta.wearable.dat.externalsampleapps.cameraaccess"
@@ -44,6 +46,8 @@ android {
     manifestPlaceholders["mwdat_client_token"] = ""
 
     buildConfigField("String", "ANTHROPIC_API_KEY", "\"$anthropicApiKey\"")
+    buildConfigField("String", "ELEVENLABS_API_KEY", "\"$elevenLabsApiKey\"")
+    buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"$elevenLabsVoiceId\"")
   }
 
   buildTypes {

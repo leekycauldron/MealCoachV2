@@ -41,6 +41,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,6 +57,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamSessionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.meal.MealModeViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.meal.ShutterMediaSession
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
@@ -76,13 +79,23 @@ fun MealScanScreen(
 ) {
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
   val mealUiState by mealViewModel.uiState.collectAsStateWithLifecycle()
+  val context = LocalContext.current
+  val shutterSession =
+      remember(context) {
+        ShutterMediaSession(
+            context = context.applicationContext,
+            onShutter = { streamViewModel.capturePhoto() },
+        )
+      }
 
   LaunchedEffect(Unit) {
     streamViewModel.setSuppressShareDialog(true)
     streamViewModel.startStream()
+    shutterSession.start()
   }
   DisposableEffect(Unit) {
     onDispose {
+      shutterSession.release()
       streamViewModel.stopStream()
       streamViewModel.setSuppressShareDialog(false)
     }

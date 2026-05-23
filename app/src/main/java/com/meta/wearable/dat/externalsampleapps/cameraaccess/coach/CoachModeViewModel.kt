@@ -10,12 +10,13 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.coach
 
 import android.app.Application
 import android.graphics.Bitmap
-import android.speech.tts.TextToSpeech
+import android.media.AudioAttributes
+import android.media.MediaDataSource
+import android.media.MediaPlayer
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
-import java.util.Locale
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -33,24 +34,26 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
     private const val POLL_INTERVAL_MS = 10_000L
     private const val COOLDOWN_MS = 30_000L
     private const val MAX_CONSECUTIVE_ERRORS = 3
+    // Delay before speaking so the camera stream's stop/disconnect sound finishes first.
+    private const val TTS_START_DELAY_MS = 1_500L
   }
 
   private val _uiState = MutableStateFlow(CoachUiState())
   val uiState: StateFlow<CoachUiState> = _uiState.asStateFlow()
 
   private var watchJob: Job? = null
+  private var speakJob: Job? = null
   private var frameProvider: (() -> Bitmap?)? = null
+  private var mediaPlayer: MediaPlayer? = null
 
-  private val tts: TextToSpeech =
-      TextToSpeech(application.applicationContext) { status ->
-        val ready = status == TextToSpeech.SUCCESS
-        if (ready) {
-          tts.language = Locale.getDefault()
-        } else {
-          Log.w(TAG, "TextToSpeech init failed (status=$status)")
-        }
-        _uiState.update { it.copy(ttsReady = ready) }
-      }
+  init {
+    val configured =
+        BuildConfig.ELEVENLABS_API_KEY.isNotBlank() && BuildConfig.ELEVENLABS_VOICE_ID.isNotBlank()
+    if (!configured) {
+      Log.w(TAG, "ElevenLabs API key/voice ID not set in local.properties; roasts will be silent")
+    }
+    _uiState.update { it.copy(ttsReady = configured) }
+  }
 
   fun updateAvoidances(text: String) {
     _uiState.update { it.copy(avoidances = text) }
@@ -120,19 +123,58 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
     _uiState.update {
       it.copy(step = CoachFlowStep.ALERT, roastMessage = roast, isWatching = false)
     }
-    speak(roast)
+    speakJob?.cancel()
+    speakJob =
+        viewModelScope.launch {
+          // Wait for the stream-end sound to finish so it doesn't talk over the roast.
+          delay(TTS_START_DELAY_MS)
+          if (_uiState.value.step == CoachFlowStep.ALERT) speak(roast)
+        }
   }
 
-  private fun speak(text: String) {
+  private suspend fun speak(text: String) {
     if (!_uiState.value.ttsReady) {
-      Log.w(TAG, "TTS not ready; skipping speak")
+      Log.w(TAG, "ElevenLabs not configured; skipping speak")
       return
     }
-    val utteranceId = "coach-roast-${System.currentTimeMillis()}"
-    tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+    ElevenLabsTtsClient.synthesize(
+            apiKey = BuildConfig.ELEVENLABS_API_KEY,
+            voiceId = BuildConfig.ELEVENLABS_VOICE_ID,
+            text = text,
+        )
+        .onSuccess { audio -> playAudio(audio) }
+        .onFailure { error -> Log.e(TAG, "ElevenLabs synthesis failed", error) }
+  }
+
+  private fun playAudio(data: ByteArray) {
+    releasePlayer()
+    mediaPlayer =
+        MediaPlayer().apply {
+          // Route as media so it plays through the connected glasses (A2DP) or the phone.
+          setAudioAttributes(
+              AudioAttributes.Builder()
+                  .setUsage(AudioAttributes.USAGE_MEDIA)
+                  .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                  .build())
+          setDataSource(ByteArrayMediaDataSource(data))
+          setOnPreparedListener { it.start() }
+          setOnCompletionListener { releasePlayer() }
+          setOnErrorListener { _, what, extra ->
+            Log.e(TAG, "MediaPlayer error what=$what extra=$extra")
+            releasePlayer()
+            true
+          }
+          prepareAsync()
+        }
+  }
+
+  private fun releasePlayer() {
+    mediaPlayer?.release()
+    mediaPlayer = null
   }
 
   fun resumeWatching() {
+    stopSpeaking()
     if (frameProvider == null) {
       _uiState.update { it.copy(step = CoachFlowStep.MONITORING) }
       return
@@ -149,16 +191,26 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
     watchJob = viewModelScope.launch { watchLoop(initialDelay = COOLDOWN_MS) }
   }
 
+  // Stops the watch loop only. Deliberately does NOT stop TTS: this runs when the monitoring
+  // screen is disposed on the MONITORING -> ALERT transition, which is exactly when the roast
+  // is starting to speak. Speech is cancelled separately via stopSpeaking() when the user
+  // actually leaves the alert/coach flow.
   fun stopMonitoring() {
     watchJob?.cancel()
     watchJob = null
     frameProvider = null
-    if (tts.isSpeaking) tts.stop()
     _uiState.update { it.copy(isWatching = false) }
+  }
+
+  private fun stopSpeaking() {
+    speakJob?.cancel()
+    speakJob = null
+    releasePlayer()
   }
 
   fun resetFlow() {
     stopMonitoring()
+    stopSpeaking()
     _uiState.value = _uiState.value.copy(
         step = CoachFlowStep.PREFERENCES,
         roastMessage = null,
@@ -168,6 +220,7 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
 
   fun goBackToPreferences() {
     stopMonitoring()
+    stopSpeaking()
     _uiState.update {
       it.copy(step = CoachFlowStep.PREFERENCES, roastMessage = null, lastError = null)
     }
@@ -176,6 +229,20 @@ class CoachModeViewModel(application: Application) : AndroidViewModel(applicatio
   override fun onCleared() {
     super.onCleared()
     stopMonitoring()
-    tts.shutdown()
+    stopSpeaking()
   }
+}
+
+/** Lets [MediaPlayer] stream the in-memory MP3 returned by ElevenLabs without a temp file. */
+private class ByteArrayMediaDataSource(private val data: ByteArray) : MediaDataSource() {
+  override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+    if (position >= data.size) return -1
+    val count = minOf(size, data.size - position.toInt())
+    System.arraycopy(data, position.toInt(), buffer, offset, count)
+    return count
+  }
+
+  override fun getSize(): Long = data.size.toLong()
+
+  override fun close() {}
 }

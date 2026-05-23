@@ -83,7 +83,7 @@
     <string name="meal_prefs_continue">Continue to menu scan</string>
 
     <!-- Meal Scan Screen -->
-    <string name="meal_scan_instruction">Point at the menu and tap the shutter for each page</string>
+    <string name="meal_scan_instruction">Tap your glasses temple (or the shutter below) for each menu page</string>
     <string name="meal_scan_count">%1$d photo(s) captured</string>
     <string name="meal_scan_done">Done scanning</string>
     <string name="meal_scan_remove">Remove</string>

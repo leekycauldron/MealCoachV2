@@ -48,6 +48,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "CameraAccess"
+rootProject.name = "MealCoachV2"
 
 include(":app")
