@@ -8,30 +8,22 @@
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
-import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,11 +33,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -57,7 +46,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamSessionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.meal.MealModeViewModel
-import com.meta.wearable.dat.externalsampleapps.cameraaccess.meal.ShutterMediaSession
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
@@ -66,7 +54,6 @@ fun MealScanScreen(
     wearablesViewModel: WearablesViewModel,
     mealViewModel: MealModeViewModel,
     onBack: () -> Unit,
-    onFinish: () -> Unit,
     modifier: Modifier = Modifier,
     streamViewModel: StreamViewModel =
         viewModel(
@@ -79,32 +66,29 @@ fun MealScanScreen(
 ) {
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
   val mealUiState by mealViewModel.uiState.collectAsStateWithLifecycle()
-  val context = LocalContext.current
-  val shutterSession =
-      remember(context) {
-        ShutterMediaSession(
-            context = context.applicationContext,
-            onShutter = { streamViewModel.capturePhoto() },
-        )
-      }
 
   LaunchedEffect(Unit) {
     streamViewModel.setSuppressShareDialog(true)
     streamViewModel.startStream()
-    shutterSession.start()
+    mealViewModel.startAutoScan(
+        getFrame = { streamViewModel.uiState.value.videoFrame },
+        triggerCapture = { streamViewModel.capturePhoto() },
+    )
   }
   DisposableEffect(Unit) {
     onDispose {
-      shutterSession.release()
+      mealViewModel.stopAutoScan()
       streamViewModel.stopStream()
       streamViewModel.setSuppressShareDialog(false)
     }
   }
 
+  // When the auto-triggered high-res capture lands, hand it to the view model for analysis.
   LaunchedEffect(streamUiState.capturedPhoto) {
     streamUiState.capturedPhoto?.let { photo ->
-      mealViewModel.addCapturedPhoto(photo)
       streamViewModel.clearCapturedPhoto()
+      mealViewModel.onMenuPhotoCaptured(photo)
+      wearablesViewModel.navigateToDeviceSelection()
     }
   }
 
@@ -140,80 +124,35 @@ fun MealScanScreen(
           color = Color.White,
           fontWeight = FontWeight.Medium,
           modifier =
-              Modifier.align(Alignment.TopCenter)
-                  .padding(top = 8.dp, start = 56.dp, end = 56.dp),
+              Modifier.align(Alignment.TopCenter).padding(top = 8.dp, start = 56.dp, end = 56.dp),
       )
 
-      Column(
-          modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().fillMaxWidth(),
-          verticalArrangement = Arrangement.spacedBy(12.dp),
-      ) {
-        if (mealUiState.capturedPhotos.isNotEmpty()) {
-          LazyRow(
-              modifier = Modifier.fillMaxWidth().height(96.dp),
-              horizontalArrangement = Arrangement.spacedBy(8.dp),
-              contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
-          ) {
-            itemsIndexed(
-                items = mealUiState.capturedPhotos,
-                key = { _, bitmap -> System.identityHashCode(bitmap) },
-            ) { index, bitmap ->
-              PhotoThumbnail(
-                  bitmap = bitmap,
-                  onRemove = { mealViewModel.removePhoto(index) },
-              )
-            }
-          }
-        }
-
-        Text(
-            text =
-                stringResource(R.string.meal_scan_count, mealUiState.capturedPhotos.size),
-            color = Color.White,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-          SwitchButton(
-              label = stringResource(R.string.meal_scan_done),
-              onClick = onFinish,
-              enabled = mealUiState.capturedPhotos.isNotEmpty(),
-              modifier = Modifier.weight(1f),
-          )
-          CaptureButton(onClick = { streamViewModel.capturePhoto() })
-        }
-      }
+      ScanStatusPill(
+          text =
+              if (mealUiState.menuDetected) stringResource(R.string.meal_scan_capturing)
+              else stringResource(R.string.meal_scan_searching),
+          modifier =
+              Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 24.dp),
+      )
     }
   }
 }
 
 @Composable
-private fun PhotoThumbnail(bitmap: Bitmap, onRemove: () -> Unit) {
-  Box(modifier = Modifier.size(96.dp)) {
-    Image(
-        bitmap = bitmap.asImageBitmap(),
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp)),
+private fun ScanStatusPill(text: String, modifier: Modifier = Modifier) {
+  Row(
+      modifier =
+          modifier
+              .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(50))
+              .padding(horizontal = 16.dp, vertical = 10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+  ) {
+    CircularProgressIndicator(
+        modifier = Modifier.size(16.dp),
+        color = Color.White,
+        strokeWidth = 2.dp,
     )
-    IconButton(
-        onClick = onRemove,
-        modifier =
-            Modifier.align(Alignment.TopEnd)
-                .padding(2.dp)
-                .size(24.dp)
-                .background(Color.Black.copy(alpha = 0.6f), shape = RoundedCornerShape(50)),
-    ) {
-      Icon(
-          Icons.Default.Close,
-          contentDescription = stringResource(R.string.meal_scan_remove),
-          tint = Color.White,
-          modifier = Modifier.size(16.dp),
-      )
-    }
+    Spacer(Modifier.width(10.dp))
+    Text(text = text, color = Color.White, fontWeight = FontWeight.Medium)
   }
 }

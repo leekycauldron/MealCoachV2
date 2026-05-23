@@ -22,6 +22,7 @@ val localProps =
 val anthropicApiKey: String = localProps.getProperty("anthropic_api_key", "")
 val elevenLabsApiKey: String = localProps.getProperty("elevenlabs_api_key", "")
 val elevenLabsVoiceId: String = localProps.getProperty("elevenlabs_voice_id", "")
+val pexelsApiKey: String = localProps.getProperty("pexels_api_key", "")
 
 android {
   namespace = "com.meta.wearable.dat.externalsampleapps.cameraaccess"
@@ -48,6 +49,7 @@ android {
     buildConfigField("String", "ANTHROPIC_API_KEY", "\"$anthropicApiKey\"")
     buildConfigField("String", "ELEVENLABS_API_KEY", "\"$elevenLabsApiKey\"")
     buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"$elevenLabsVoiceId\"")
+    buildConfigField("String", "PEXELS_API_KEY", "\"$pexelsApiKey\"")
   }
 
   buildTypes {
@@ -79,6 +81,8 @@ dependencies {
   implementation(libs.androidx.activity.compose)
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.exifinterface)
+  implementation(libs.coil.compose)
+  implementation(libs.mlkit.text.recognition)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.material.icons.extended)

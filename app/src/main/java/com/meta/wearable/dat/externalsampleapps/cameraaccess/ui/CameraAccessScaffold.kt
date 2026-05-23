@@ -254,10 +254,6 @@ private fun MealFlowHost(
               wearablesViewModel.navigateToDeviceSelection()
               mealViewModel.backToPreferences()
             },
-            onFinish = {
-              wearablesViewModel.navigateToDeviceSelection()
-              mealViewModel.finishScanningAndAnalyze()
-            },
         )
       } else {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -278,6 +274,8 @@ private fun MealFlowHost(
               mealViewModel.startOver()
               wearablesViewModel.clearAppMode()
             },
+            onSelectRecommendation = { mealViewModel.selectRecommendation(it) },
+            onDismissDetail = { mealViewModel.dismissDetail() },
         )
   }
 }

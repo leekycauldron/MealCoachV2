@@ -25,14 +25,18 @@ object AnthropicApiClient {
   private const val ENDPOINT = "https://api.anthropic.com/v1/messages"
   private const val ANTHROPIC_VERSION = "2023-06-01"
   private const val DEFAULT_MODEL = "claude-sonnet-4-6"
+  private const val DETECT_MODEL = "claude-haiku-4-5-20251001"
   private const val JPEG_QUALITY = 85
   private const val MAX_TOKENS = 1024
+  private const val DETECT_MAX_TOKENS = 8
+  private const val TOOL_NAME = "report_recommendations"
 
+  /** Asks Claude for the user's best menu items as structured data (via tool use). */
   suspend fun recommendMeal(
       apiKey: String,
       preferences: String,
       menuPhotos: List<Bitmap>,
-  ): Result<String> =
+  ): Result<List<MenuRecommendation>> =
       withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
           return@withContext Result.failure(
@@ -42,73 +46,194 @@ object AnthropicApiClient {
         if (menuPhotos.isEmpty()) {
           return@withContext Result.failure(IllegalArgumentException("No menu photos captured."))
         }
-
         try {
-          val body = buildRequestBody(preferences, menuPhotos)
+          val body = buildRecommendBody(preferences, menuPhotos)
           val response = postJson(apiKey, body)
-          val text = extractText(response)
-          Result.success(text)
+          Result.success(parseRecommendations(response))
         } catch (e: Exception) {
-          Log.e(TAG, "Anthropic API call failed", e)
+          Log.e(TAG, "recommendMeal failed", e)
           Result.failure(e)
         }
       }
 
-  private fun buildRequestBody(preferences: String, menuPhotos: List<Bitmap>): String {
+  /** Fast YES/NO classifier: does [frame] show a readable restaurant menu? */
+  suspend fun detectMenu(apiKey: String, frame: Bitmap): Result<Boolean> =
+      withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) {
+          return@withContext Result.failure(
+              IllegalStateException("Anthropic API key is missing."))
+        }
+        try {
+          val system =
+              """
+              You are a fast visual classifier. Decide whether the image clearly shows a
+              restaurant menu: a list of food or drink items, typically with names and prices,
+              readable enough to make a recommendation from. A plain table, food on a plate, or
+              an unreadable blur is NOT a menu.
+              Respond with exactly one word: YES or NO. No punctuation, no explanation.
+              """
+                  .trimIndent()
+
+          val content =
+              JSONArray()
+                  .put(imageBlock(frame))
+                  .put(textBlock("Is this a readable menu? YES or NO."))
+
+          val root =
+              JSONObject().apply {
+                put("model", DETECT_MODEL)
+                put("max_tokens", DETECT_MAX_TOKENS)
+                put("system", system)
+                put("messages", JSONArray().put(userMessage(content)))
+              }
+
+          val response = postJson(apiKey, root.toString())
+          val text = extractText(response).trim().uppercase()
+          Result.success(text.startsWith("YES"))
+        } catch (e: Exception) {
+          Log.e(TAG, "detectMenu failed", e)
+          Result.failure(e)
+        }
+      }
+
+  private fun buildRecommendBody(preferences: String, menuPhotos: List<Bitmap>): String {
     val systemPrompt =
         """
-        You are a meal-recommendation assistant. The user is at a restaurant and has
-        photographed the menu. Look carefully at the menu image(s) and recommend the
-        single best menu item for the user based on their stated preferences.
+        You are a meal-recommendation assistant. The user photographed a restaurant menu.
+        Choose the user's best options based on their preferences and report them by calling the
+        $TOOL_NAME tool. Return up to 5 items, strongest first.
 
-        Format your response as:
-        - **Recommendation:** <name of the dish exactly as it appears on the menu>
-        - **Why:** 2-3 short sentences explaining why this item fits the user's preferences.
-        - **Heads up:** Any allergens, large portions, or caveats they should know.
+        For each item:
+          - name: copy the dish name EXACTLY as printed on the menu (verbatim), so it can be
+            located on the image. Do not paraphrase or translate.
+          - score: 0.0 to 1.0, how strongly you recommend it for THIS user (1.0 = top pick).
+          - reason: 1-2 short sentences on why it fits their preferences.
+          - caveats: allergens, large portions, or things to watch for (omit if none).
 
-        If the menu photo is unreadable, say so plainly.
+        Only include items that actually appear on the menu. If the menu is unreadable, return an
+        empty list.
         """
             .trimIndent()
 
     val userInstructions =
         if (preferences.isBlank()) {
-          "Recommend the best item from the menu shown in the photos."
+          "Recommend the best items from the menu shown in the photos."
         } else {
-          "My preferences: $preferences\n\nRecommend the best item from the menu shown in the photos."
+          "My preferences: $preferences\n\nRecommend the best items from the menu shown in the photos."
         }
 
     val content = JSONArray()
-    menuPhotos.forEach { bitmap ->
-      val imageObj =
-          JSONObject().apply {
-            put("type", "image")
-            put(
-                "source",
-                JSONObject().apply {
-                  put("type", "base64")
-                  put("media_type", "image/jpeg")
-                  put("data", bitmapToBase64Jpeg(bitmap))
-                })
-          }
-      content.put(imageObj)
-    }
-    content.put(JSONObject().apply { put("type", "text").put("text", userInstructions) })
-
-    val message =
-        JSONObject().apply {
-          put("role", "user")
-          put("content", content)
-        }
+    menuPhotos.forEach { content.put(imageBlock(it)) }
+    content.put(textBlock(userInstructions))
 
     val root =
         JSONObject().apply {
           put("model", DEFAULT_MODEL)
           put("max_tokens", MAX_TOKENS)
           put("system", systemPrompt)
-          put("messages", JSONArray().put(message))
+          put("tools", JSONArray().put(recommendationTool()))
+          put(
+              "tool_choice",
+              JSONObject().apply {
+                put("type", "tool")
+                put("name", TOOL_NAME)
+              })
+          put("messages", JSONArray().put(userMessage(content)))
         }
     return root.toString()
   }
+
+  private fun recommendationTool(): JSONObject {
+    val item =
+        JSONObject().apply {
+          put("type", "object")
+          put(
+              "properties",
+              JSONObject().apply {
+                put("name", schema("string", "Dish name exactly as printed on the menu"))
+                put("score", schema("number", "0..1 recommendation strength (1 = top pick)"))
+                put("reason", schema("string", "Why it fits the user's preferences"))
+                put("caveats", schema("string", "Allergens or things to watch for; optional"))
+              })
+          put("required", JSONArray().put("name").put("score").put("reason"))
+        }
+
+    val inputSchema =
+        JSONObject().apply {
+          put("type", "object")
+          put(
+              "properties",
+              JSONObject().apply {
+                put(
+                    "recommendations",
+                    JSONObject().apply {
+                      put("type", "array")
+                      put("items", item)
+                    })
+              })
+          put("required", JSONArray().put("recommendations"))
+        }
+
+    return JSONObject().apply {
+      put("name", TOOL_NAME)
+      put("description", "Report the recommended menu items for the user.")
+      put("input_schema", inputSchema)
+    }
+  }
+
+  private fun schema(type: String, description: String): JSONObject =
+      JSONObject().apply {
+        put("type", type)
+        put("description", description)
+      }
+
+  private fun parseRecommendations(response: String): List<MenuRecommendation> {
+    val content = JSONObject(response).optJSONArray("content") ?: return emptyList()
+    for (i in 0 until content.length()) {
+      val block = content.getJSONObject(i)
+      if (block.optString("type") != "tool_use") continue
+      val items = block.optJSONObject("input")?.optJSONArray("recommendations") ?: continue
+      val result = mutableListOf<MenuRecommendation>()
+      for (j in 0 until items.length()) {
+        val o = items.getJSONObject(j)
+        val name = o.optString("name").trim()
+        if (name.isEmpty()) continue
+        result.add(
+            MenuRecommendation(
+                name = name,
+                score = o.optDouble("score", 0.0).toFloat().coerceIn(0f, 1f),
+                reason = o.optString("reason").trim(),
+                caveats = o.optString("caveats").trim().ifEmpty { null },
+            ))
+      }
+      return result
+    }
+    return emptyList()
+  }
+
+  private fun imageBlock(bitmap: Bitmap): JSONObject =
+      JSONObject().apply {
+        put("type", "image")
+        put(
+            "source",
+            JSONObject().apply {
+              put("type", "base64")
+              put("media_type", "image/jpeg")
+              put("data", bitmapToBase64Jpeg(bitmap))
+            })
+      }
+
+  private fun textBlock(text: String): JSONObject =
+      JSONObject().apply {
+        put("type", "text")
+        put("text", text)
+      }
+
+  private fun userMessage(content: JSONArray): JSONObject =
+      JSONObject().apply {
+        put("role", "user")
+        put("content", content)
+      }
 
   private fun bitmapToBase64Jpeg(bitmap: Bitmap): String {
     val stream = ByteArrayOutputStream()

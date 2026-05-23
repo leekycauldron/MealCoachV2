@@ -83,18 +83,24 @@
     <string name="meal_prefs_continue">Continue to menu scan</string>
 
     <!-- Meal Scan Screen -->
-    <string name="meal_scan_instruction">Tap your glasses temple (or the shutter below) for each menu page</string>
-    <string name="meal_scan_count">%1$d photo(s) captured</string>
-    <string name="meal_scan_done">Done scanning</string>
-    <string name="meal_scan_remove">Remove</string>
+    <string name="meal_scan_instruction">Point your glasses at the menu — I\'ll capture it automatically</string>
+    <string name="meal_scan_searching">Looking for a menu…</string>
+    <string name="meal_scan_capturing">Menu found — capturing…</string>
 
     <!-- Meal Analyzing / Result Screen -->
     <string name="meal_analyzing">Analyzing the menu…</string>
     <string name="meal_result_title">My recommendation</string>
     <string name="meal_result_error_title">Couldn\'t get a recommendation</string>
+    <string name="meal_result_empty">No recommendations to show.</string>
     <string name="meal_result_retry">Retry</string>
     <string name="meal_result_rescan">Rescan menu</string>
     <string name="meal_result_start_over">Start over</string>
+    <string name="meal_result_tap_hint">Tap a dot for details</string>
+    <string name="meal_result_unplaced">Couldn\'t pin these on the menu:</string>
+    <string name="meal_detail_why">Why</string>
+    <string name="meal_detail_caveats">Heads up</string>
+    <string name="meal_detail_close">Close</string>
+    <string name="meal_detail_no_image">No image found</string>
 
     <!-- Coming Soon -->
     <string name="coming_soon_title">Coming soon</string>
